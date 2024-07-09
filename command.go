@@ -141,3 +141,65 @@ func handleCmdReq(br *broker, c *gin.Context) {
 	case <-ctx.Done():
 	}
 }
+
+func handleCmdUpgrade(devid string, br *broker, c *gin.Context, params jsoniter.Any) {
+	ctx, cancel := context.WithCancel(context.Background())
+	req := &commandReq{
+		cancel: cancel,
+		c:      c,
+		devid:  devid,
+	}
+	_, ok := br.devices[devid]
+	if !ok {
+		cmdErrReply(rttyCmdErrOffline, req)
+		return
+	}
+	token := utils.GenUniqueID("cmd")
+
+	//params := jsoniter.Get(content, "params")
+
+	data := make([]string, 5)
+
+	data[0] = "root"
+	data[1] = "Mind@123"
+	data[2] = "aibox_upgrade"
+	data[3] = token
+	data[4] = string(byte(params.Size()))
+
+	msg := []byte(strings.Join(data, string(byte(0))))
+
+	for i := 0; i < params.Size(); i++ {
+		msg = append(msg, params.Get(i).ToString()...)
+		msg = append(msg, 0)
+	}
+
+	req.data = msg
+	br.cmdReq <- req
+
+	waitTime := commandTimeout
+
+	wait := c.Query("wait")
+	if wait != "" {
+		waitTime, _ = strconv.Atoi(wait)
+	}
+
+	if waitTime == 0 {
+		c.Status(http.StatusOK)
+		return
+	}
+
+	commands.Store(token, req)
+
+	if waitTime < 0 || waitTime > commandTimeout {
+		waitTime = commandTimeout
+	}
+
+	tmr := time.NewTimer(time.Second * time.Duration(waitTime))
+
+	select {
+	case <-tmr.C:
+		cmdErrReply(rttyCmdErrTimeout, req)
+		commands.Delete(token)
+	case <-ctx.Done():
+	}
+}

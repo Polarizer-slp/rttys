@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	jsoniter "github.com/json-iterator/go"
 	"io/fs"
 	"net"
 	"net/http"
@@ -589,6 +591,82 @@ func apiStart(br *broker) {
 		}
 	})
 
+	r.GET("/download/:filename", func(c *gin.Context) {
+		filename := c.Param("filename")
+		fmt.Println("开始下载文件" + filename)
+		filePath := "./uploads/" + filename
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			log.Printf("File not found: %v", err)
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.FileAttachment(filePath, filename)
+	})
+	r.POST("/upload", func(c *gin.Context) {
+		// 单文件
+		file, err := c.FormFile("file")
+		if err != nil {
+			log.Printf("Error retrieving the file: %v", err)
+			c.String(http.StatusBadRequest, fmt.Sprintf("上传文件出错：%s", err.Error()))
+			return
+		}
+		// 检查文件大小
+		if fileSize := file.Size; fileSize > 10<<20 { // 限制文件大小为10MB
+			err = errors.New("上传文件过大")
+			log.Printf("File size too large: %v", err)
+			c.String(http.StatusBadRequest, fmt.Sprintf("文件大小超过限制：%s", err.Error()))
+			return
+		}
+		// 保存文件到服务器的指定位置
+		dst := "./uploads/" + file.Filename
+		if err := c.SaveUploadedFile(file, dst); err != nil {
+			log.Printf("Error saving uploaded file: %v", err)
+			c.String(http.StatusInternalServerError, fmt.Sprintf("保存文件出错：%s", err.Error()))
+			return
+		}
+		devids := c.PostForm("devids")
+		devidlist := strings.Split(devids, ",")
+		// 初始化一个包含两个字符串的切片
+		strSlice := []string{"web", file.Filename}
+		upgraderType := c.PostForm("type")
+		switch upgraderType {
+		case "web":
+			strSlice = []string{"web", file.Filename}
+		case "system":
+			strSlice = []string{"system", file.Filename}
+		case "model":
+			strSlice = []string{"model", file.Filename}
+		default:
+			strSlice = nil
+		}
+		if strSlice == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": fmt.Sprintf("文件 '%s' 升级失败", file.Filename),
+			})
+		}
+		// 使用json-iterator将切片转换为jsoniter.Any类型
+		jsonIter := jsoniter.ConfigCompatibleWithStandardLibrary
+		params, err := jsonIter.Marshal(strSlice)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": fmt.Sprintf("jsonIter.Marshal 文件 '%s' 升级失败", file.Filename),
+			})
+		}
+		var paramsAny jsoniter.Any
+		if err := jsonIter.Unmarshal(params, &paramsAny); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": fmt.Sprintf("jsonIter.Unmarshal 文件 '%s' 升级失败", file.Filename),
+			})
+		}
+		for _, devid := range devidlist {
+			fmt.Println("开始升级设备" + devid)
+			handleCmdUpgrade(devid, br, c, paramsAny)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": fmt.Sprintf("文件 '%s' 上传成功", file.Filename),
+		})
+	})
 	r.NoRoute(func(c *gin.Context) {
 		fs, _ := fs.Sub(staticFs, "ui/dist")
 
